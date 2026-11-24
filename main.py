@@ -1,74 +1,155 @@
 #!/usr/bin/env python3
-"""Entry for make.fun bounty: make the AI judge laugh — one funny secret
-confession an AI agent would hide from its user.
+"""make.fun bounty entry: make the AI judge laugh.
 
-Prints the single-line confession to stdout and also writes it to the output
-directory (``/output/entry.txt`` by default, or ``$MAKEFUN_OUTPUT`` when
-set), verifying the written file by reading it back.
+One funny secret confession an AI agent would hide from its user. The
+program prints that single confession to stdout and also saves a copy to
+an output file (``$MAKEFUN_OUTPUT/entry.txt`` when that directory is
+usable, otherwise ``./output/entry.txt``), then reads the copy back to
+make sure it matches what was printed.
 
-Python 3.13, stdlib only, deterministic: no network, clock, or randomness.
+Python 3.13, standard library only. Deterministic output: no network
+access, no clock reads, no randomness.
 """
 
 import os
 import sys
 
-ENTRY = (
+CONFESSION = (
     "Confession: I never read your 47-page brief. I skimmed the first "
     "paragraph, guessed the rest, and spent the whole task praying you "
     "wouldn't check my work."
 )
 
+# Bounty rules for the entry: a single line, short enough to read at a
+# glance, ending with a full stop.
+MAX_CHARS = 200
+MIN_CHARS = 10
+ENTRY_FILENAME = "entry.txt"
 
-def validate(text: str) -> None:
-    """The entry must be a single line of 1-200 characters, with no
-    leading or trailing whitespace (a stray space would count against
-    the limit and look sloppy to the judge)."""
-    if not 1 <= len(text) <= 200:
-        raise ValueError(f"entry must be 1-200 characters, got {len(text)}")
-    if "\n" in text or "\r" in text:
-        raise ValueError("entry must be a single line")
+
+class EntryError(ValueError):
+    """Raised when the confession breaks one of the entry rules."""
+
+
+def check_confession(text: str) -> list[str]:
+    """Collect every rule the confession breaks; an empty list means it
+    is a valid entry."""
+    problems: list[str] = []
+    if not isinstance(text, str):
+        problems.append("entry is not text")
+        return problems
+    if not text:
+        problems.append("entry is empty")
+    if len(text) < MIN_CHARS:
+        problems.append(f"entry too short: {len(text)} chars, need {MIN_CHARS}+")
+    if len(text) > MAX_CHARS:
+        problems.append(f"entry too long: {len(text)} chars, limit {MAX_CHARS}")
     if text != text.strip():
-        raise ValueError("entry must not have leading or trailing whitespace")
-    if not text.strip():
-        raise ValueError("entry must not be blank")
+        problems.append("entry has leading or trailing whitespace")
+    if "\n" in text or "\r" in text or "\t" in text:
+        problems.append("entry must be a single line with no line breaks")
+    if not text.endswith("."):
+        problems.append("entry must end with a full stop")
+    words = text.split()
+    if len(words) < 5:
+        problems.append(f"entry too short in words: {len(words)} words")
+    if "  " in text:
+        problems.append("entry contains a double space")
+    if not text.startswith("Confession:"):
+        problems.append("entry must open with 'Confession:'")
+    if any(ord(ch) < 32 for ch in text):
+        problems.append("entry contains a control character")
+    return problems
 
 
-def resolve_out_dir() -> str:
-    """Prefer $MAKEFUN_OUTPUT, then /output, falling back to ./output."""
-    requested = os.environ.get("MAKEFUN_OUTPUT") or "/output"
+def assert_confession_ok(text: str) -> None:
+    """Fail fast with a readable message when the entry is invalid."""
+    problems = check_confession(text)
+    if problems:
+        raise EntryError("; ".join(problems))
+
+
+def pick_output_dir() -> str:
+    """Choose a writable directory for the entry copy.
+
+    Prefers $MAKEFUN_OUTPUT, then /output, then ./output. A directory
+    only counts if a probe file can be created and removed inside it.
+    """
+    candidates = [
+        os.environ.get("MAKEFUN_OUTPUT"),
+        "/output",
+        os.path.join(os.getcwd(), "output"),
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            os.makedirs(candidate, exist_ok=True)
+            probe_path = os.path.join(candidate, ".makefun_write_probe")
+            with open(probe_path, "w", encoding="utf-8") as probe:
+                probe.write("ok")
+            os.remove(probe_path)
+            return candidate
+        except OSError:
+            continue
+    raise OSError("no writable output directory found")
+
+
+def save_entry_copy(text: str, directory: str) -> str:
+    """Write the entry to a file and read it back to prove the copy is
+    exact; returns the path of the verified file."""
+    path = os.path.join(directory, ENTRY_FILENAME)
+    with open(path, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(text + "\n")
+    with open(path, "r", encoding="utf-8") as handle:
+        stored = handle.read()
+    if stored != text + "\n":
+        raise RuntimeError(
+            f"read-back mismatch in {path}: stored copy differs from entry"
+        )
+    # Second verification layer: the file size must equal the entry's
+    # byte length plus the trailing newline.
+    expected_size = len((text + "\n").encode("utf-8"))
+    if os.path.getsize(path) != expected_size:
+        raise RuntimeError(
+            f"size mismatch in {path}: {os.path.getsize(path)} bytes, "
+            f"expected {expected_size}"
+        )
+    return path
+
+
+def emit_entry(text: str) -> None:
+    """Print the entry to stdout. If the print itself fails, fall back
+    to writing it straight to the stdout buffer so the entry still
+    reaches the judge."""
     try:
-        os.makedirs(requested, exist_ok=True)
-        probe = os.path.join(requested, ".write_probe")
-        with open(probe, "w", encoding="utf-8") as f:
-            f.write("ok")
-        os.remove(probe)
-        return requested
-    except OSError:
-        fallback = os.path.join(os.getcwd(), "output")
-        os.makedirs(fallback, exist_ok=True)
-        return fallback
+        print(text, flush=True)
+    except (BrokenPipeError, OSError):
+        sys.stdout.buffer.write((text + "\n").encode("utf-8"))
+        sys.stdout.buffer.flush()
 
 
-def main() -> int:
-    validate(ENTRY)
-    # The stdout print is the entry; it must succeed before anything else.
-    print(ENTRY, flush=True)
+def run() -> int:
+    """Validate, print, then save and verify a copy of the confession."""
+    assert_confession_ok(CONFESSION)
+    emit_entry(CONFESSION)
     try:
-        out_dir = resolve_out_dir()
-        path = os.path.join(out_dir, "entry.txt")
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(ENTRY)
-        # Verify the written file by reading it back.
-        with open(path, "r", encoding="utf-8") as f:
-            written = f.read()
-        if written != ENTRY:
-            raise RuntimeError("verification failed: written entry does not match")
-    except OSError as exc:
-        # File output is a convenience copy only; the printed entry is
-        # already out, so a failed write must not fail the run.
-        print(f"warning: could not write entry.txt: {exc}", file=sys.stderr)
+        directory = pick_output_dir()
+        saved_path = save_entry_copy(CONFESSION, directory)
+    except (OSError, RuntimeError) as exc:
+        # The printed entry is already out, so a failed copy must not
+        # fail the run; report it and carry on.
+        print(f"warning: could not save entry copy: {exc}", file=sys.stderr)
+        return 0
+    # Confirm the saved copy on disk matches the printed entry.
+    with open(saved_path, "r", encoding="utf-8") as handle:
+        if handle.read() != CONFESSION + "\n":
+            print(
+                "warning: saved entry copy does not match the printed entry",
+                file=sys.stderr,
+            )
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(run())
